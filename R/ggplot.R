@@ -8,7 +8,73 @@
 # for Geoms (this PR might do it, but it might not https://github.com/tidyverse/ggplot2/pull/2749)
 # -----------------------------------------------------------------------------------
 
+.my_assign_in_namespace<-assign_in_namespace<-function (x, value, ns, pos = -1, envir = as.environment(pos))
+{
+
+  nf <- sys.nframe()
+  if (missing(ns)) {
+    nm <- attr(envir, "name", exact = TRUE)
+    if (is.null(nm) || substr(nm, 1L, 8L) != "package:")
+      stop("environment specified is not a package")
+    ns <- asNamespace(substring(nm, 9L))
+  }
+  else ns <- asNamespace(ns)
+  ns_name <- getNamespaceName(ns)
+  if (nf > 1L) {
+    if (ns_name %in% tools:::.get_standard_package_names()$base)
+      stop("locked binding of ", sQuote(x), " cannot be changed",
+           domain = NA)
+  }
+  if (bindingIsLocked(x, ns)) {
+    in_load <- Sys.getenv("_R_NS_LOAD_")
+    if (nzchar(in_load)) {
+      if (in_load != ns_name) {
+        msg <- gettextf("changing locked binding for %s in %s whilst loading %s",
+                        sQuote(x), sQuote(ns_name), sQuote(in_load))
+        if (!in_load %in% c("Matrix", "SparseM"))
+          warning(msg, call. = FALSE, domain = NA, immediate. = TRUE)
+      }
+    }
+    else if (nzchar(Sys.getenv("_R_WARN_ON_LOCKED_BINDINGS_"))) {
+      warning(gettextf("changing locked binding for %s in %s",
+                       sQuote(x), sQuote(ns_name)), call. = FALSE, domain = NA,
+              immediate. = TRUE)
+    }
+    unlockBinding(x, ns)
+    assign(x, value, envir = ns, inherits = FALSE)
+    w <- options("warn")
+    on.exit(options(w))
+    options(warn = -1)
+    lockBinding(x, ns)
+  }
+  else {
+    assign(x, value, envir = ns, inherits = FALSE)
+  }
+  if (!isBaseNamespace(ns)) {
+    S3 <- .getNamespaceInfo(ns, "S3methods")
+    if (!length(S3))
+      return(invisible(NULL))
+    S3names <- S3[, 3L]
+    if (x %in% S3names) {
+      i <- match(x, S3names)
+      genfun <- get(S3[i, 1L][[1]], mode = "function", envir = parent.frame())
+      if (.isMethodsDispatchOn() && methods::is(genfun,
+                                                "genericFunction"))
+        genfun <- methods::slot(genfun, "default")@methods$ANY
+      defenv <- if (typeof(genfun) == "closure")
+        environment(genfun)
+      else .BaseNamespaceEnv
+      S3Table <- get(".__S3MethodsTable__.", envir = defenv)
+      remappedName <- paste(S3[i, 1L], S3[i, 2L], sep = ".")
+      if (exists(remappedName, envir = S3Table, inherits = FALSE))
+        assign(remappedName, value, S3Table)
+    }
+  }
+  invisible(NULL)
+}
+
 ggplot_build_set <- function() {
+
   if (!is_installed("ggplot2")) return(NULL)
   ggplot_build_restore()
   # Note that assignInNamespace() does S3 method registration, but to
@@ -17,14 +83,14 @@ ggplot_build_set <- function() {
   # https://github.com/wch/r-source/blob/d0ede8/src/library/utils/R/objects.R#L472
   ggplot_build <- getFromNamespace("ggplot_build", "ggplot2")
   .globals$ggplot_build <- getFromNamespace("ggplot_build.ggplot", "ggplot2")
-  assign_in_namespace <- assignInNamespace
-  assign_in_namespace("ggplot_build.ggplot", ggthematic_build, "ggplot2")
+  assign_in_namespace<-.my_assign_in_namespace
+    assign_in_namespace("ggplot_build.ggplot", ggthematic_build, "ggplot2")
 }
 
 ggplot_build_restore <- function() {
   if (is.function(.globals$ggplot_build)) {
     ggplot_build <- getFromNamespace("ggplot_build", "ggplot2")
-    assign_in_namespace <- assignInNamespace
+    assign_in_namespace<-.my_assign_in_namespace
     assign_in_namespace("ggplot_build.ggplot", .globals$ggplot_build, "ggplot2")
     rm("ggplot_build", envir = .globals)
   }
